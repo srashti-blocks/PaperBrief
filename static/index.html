@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PaperBrief</title>
+<style>
+  :root { --bg:#f5f8f9; --ink:#12262b; --muted:#5a6f75; --line:#cfdadd; --accent:#0b6e7a; --err:#b3261e; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink); font:16px/1.55 Georgia, "Times New Roman", serif; }
+  main { max-width: 860px; margin: 0 auto; padding: 32px 20px 64px; }
+  h1 { font-size: 2rem; margin: 0 0 4px; }
+  p.lede { color: var(--muted); margin: 0 0 24px; max-width: 60ch; }
+  textarea { width:100%; min-height:190px; padding:12px; border:1px solid var(--line); border-radius:6px;
+             font:15px/1.5 Georgia, serif; background:#fff; color:var(--ink); resize:vertical; }
+  .row { display:flex; gap:12px; align-items:center; margin-top:10px; flex-wrap:wrap; }
+  button { background:var(--accent); color:#fff; border:0; border-radius:6px; padding:10px 18px;
+           font:600 15px system-ui, sans-serif; cursor:pointer; }
+  button:disabled { opacity:.55; cursor:wait; }
+  button.link { background:none; color:var(--accent); padding:0; font-weight:500; }
+  button:focus-visible, textarea:focus-visible { outline:3px solid #7cc4cc; outline-offset:2px; }
+  #count, #msg { font:14px system-ui, sans-serif; color:var(--muted); }
+  #msg.error { color:var(--err); }
+  section.card { background:#fff; border:1px solid var(--line); border-radius:6px; padding:18px 20px; margin-top:24px; }
+  h2 { font-size:1.25rem; margin:0 0 8px; }
+  h3 { font:600 14px system-ui, sans-serif; color:var(--muted); margin:16px 0 4px; }
+  ul { margin:0; padding-left:20px; }
+  .tags span { display:inline-block; border:1px solid var(--line); border-radius:99px; padding:1px 10px;
+               font:13px system-ui, sans-serif; margin:0 6px 6px 0; }
+  .meta { font:13px system-ui, sans-serif; color:var(--muted); margin-top:14px; }
+  #history li { margin:4px 0; } #stats { font:13px system-ui, sans-serif; color:var(--muted); }
+</style>
+</head>
+<body>
+<main>
+  <h1>PaperBrief</h1>
+  <p class="lede">Paste an abstract or a section of a paper. You get the findings, methods and limitations in a fixed structure.</p>
+
+  <label for="text" class="sr" style="position:absolute;left:-9999px">Paper text</label>
+  <textarea id="text" placeholder="Paste at least 200 characters of paper text..."></textarea>
+  <div class="row">
+    <button id="go">Summarize</button>
+    <span id="count">0 / 20000</span>
+    <span id="msg" role="status"></span>
+  </div>
+
+  <section class="card" id="result" hidden></section>
+
+  <section class="card">
+    <h2>Recent summaries</h2>
+    <ul id="history"></ul>
+    <p id="stats"></p>
+  </section>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const el = (tag, text, cls) => { const n = document.createElement(tag); if (text !== undefined) n.textContent = text; if (cls) n.className = cls; return n; };
+
+$("text").addEventListener("input", () => { $("count").textContent = $("text").value.length + " / 20000"; });
+
+function render(r) {
+  const box = $("result");
+  box.replaceChildren(el("h2", r.title_guess), el("p", r.summary));
+  box.append(el("h3", "Key findings"));
+  const ul = el("ul"); r.key_findings.forEach((f) => ul.append(el("li", f))); box.append(ul);
+  box.append(el("h3", "Methods"), el("p", r.methods), el("h3", "Limitations"), el("p", r.limitations));
+  const tags = el("div", undefined, "tags"); r.keywords.forEach((k) => tags.append(el("span", k)));
+  box.append(tags);
+  if (r.latency_ms) box.append(el("p", `Done in ${(r.latency_ms / 1000).toFixed(1)}s, ${r.attempts} attempt(s)`, "meta"));
+  box.hidden = false;
+}
+
+async function loadHistory() {
+  const [items, stats] = await Promise.all([fetch("/api/summaries").then((r) => r.json()), fetch("/api/stats").then((r) => r.json())]);
+  const list = $("history"); list.replaceChildren();
+  if (!items.length) list.append(el("li", "Nothing yet. Paste some text above."));
+  items.forEach((i) => {
+    const li = el("li");
+    if (i.status === "ok") {
+      const b = el("button", i.title, "link");
+      b.onclick = async () => render(await (await fetch(`/api/summaries/${i.id}`)).json());
+      const d = el("button", "delete", "link"); d.style.marginLeft = "10px";
+      d.onclick = async () => { await fetch(`/api/summaries/${i.id}`, { method: "DELETE" }); loadHistory(); };
+      li.append(b, d);
+    } else li.textContent = `Failed run (${i.created_at})`;
+    list.append(li);
+  });
+  $("stats").textContent = `${stats.total} runs, ${stats.ok} ok, ${stats.failed} failed, ${stats.recovered_by_retry} recovered by retry`;
+}
+
+$("go").addEventListener("click", async () => {
+  const msg = $("msg"); msg.className = ""; msg.textContent = "";
+  $("go").disabled = true; msg.textContent = "Summarizing...";
+  try {
+    const res = await fetch("/api/summaries", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ text: $("text").value }) });
+    const data = await res.json();
+    if (!res.ok) throw new Error(typeof data.detail === "string" ? data.detail : "Text must be between 200 and 20000 characters.");
+    render(data); msg.textContent = "";
+  } catch (e) { msg.className = "error"; msg.textContent = e.message; }
+  $("go").disabled = false; loadHistory();
+});
+loadHistory();
+</script>
+</body>
+</html>
