@@ -1,0 +1,6 @@
+dotenv
+fastapi
+uvicorn[standard]
+anthropic
+httpx
+pydantic
