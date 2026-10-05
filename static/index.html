@@ -95,6 +95,7 @@ $("go").addEventListener("click", async () => {
   try {
     const res = await fetch("/api/summaries", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ text: $("text").value }) });
     const data = await res.json();
+    if (res.status === 429) throw new Error("Too many requests. Wait a minute and try again.");
     if (!res.ok) throw new Error(typeof data.detail === "string" ? data.detail : "Text must be between 200 and 20000 characters.");
     render(data); msg.textContent = "";
   } catch (e) { msg.className = "error"; msg.textContent = e.message; }

@@ -8,19 +8,26 @@ from contextlib import closing
 from dotenv import load_dotenv
 
 import httpx
-from anthropic import Anthropic
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field, ValidationError
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from slowapi.util import get_remote_address
+
 load_dotenv()
 DB_PATH = os.getenv("DB_PATH", "paperbrief.db")
-MODEL = os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite")
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")  # optional: e.g. an n8n / Make webhook
 MAX_ATTEMPTS = 3
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("paperbrief")
+
+# Setup rate limiter
+limiter = Limiter(key_func=get_remote_address)
 app = FastAPI(title="PaperBrief")
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 SYSTEM_PROMPT = """You summarize research paper text for a busy reader.
 Return ONLY a JSON object, no markdown, with exactly these keys:
@@ -85,7 +92,7 @@ def save_run(chars, status, attempts, latency_ms, result=None, error=None):
 
 # ---------- LLM ----------
 def call_gemini(text: str, key: str) -> str:
-    model = os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite")
+    model = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
     resp = httpx.post(
         f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
         headers={"x-goog-api-key": key},
@@ -95,10 +102,9 @@ def call_gemini(text: str, key: str) -> str:
             "generationConfig": {
                 "responseMimeType": "application/json",
                 "maxOutputTokens": 8192,
-                "thinkingConfig": {"thinkingLevel": "low"},
             },
         },
-        timeout=90,
+        timeout=30,
     )
     if resp.status_code != 200:
         raise RuntimeError(f"Gemini {resp.status_code}: {resp.text[:300]}")
@@ -109,25 +115,19 @@ def call_gemini(text: str, key: str) -> str:
     parts = cand.get("content", {}).get("parts", [])
     return "".join(p.get("text", "") for p in parts if not p.get("thought"))
 
+
 def call_llm(text: str) -> str:
-    gemini_key = os.getenv("GEMINI_API_KEY")
-    if gemini_key:  # free option: get a key at aistudio.google.com/apikey
-        return call_gemini(text, gemini_key)
-    key = os.getenv("ANTHROPIC_API_KEY")
-    if not key:  # demo mode so the UI can be tested without an API key
+    key = os.getenv("GEMINI_API_KEY")
+    if not key:  # demo mode so the UI works without a key
         return json.dumps({
             "title_guess": "DEMO MODE (no API key set)",
-            "summary": "Set GEMINI_API_KEY (free) to get real summaries.",
+            "summary": "Set GEMINI_API_KEY to get real summaries.",
             "key_findings": ["This is placeholder output."],
-            "methods": "Not stated", "limitations": "Not stated",
+            "methods": "Not stated",
+            "limitations": "Not stated",
             "keywords": ["demo"],
         })
-    client = Anthropic(api_key=key)
-    msg = client.messages.create(
-        model=MODEL, max_tokens=1000, system=SYSTEM_PROMPT,
-        messages=[{"role": "user", "content": text}],
-    )
-    return msg.content[0].text
+    return call_gemini(text, key)
 
 
 def parse_brief(raw: str) -> Brief:
@@ -146,7 +146,8 @@ def notify_webhook(payload: dict):
 
 # ---------- routes ----------
 @app.post("/api/summaries", status_code=201)
-def create_summary(body: SummaryIn):
+@limiter.limit("5/minute")
+def create_summary(request: Request, body: SummaryIn):
     start, last_error = time.time(), "unknown"
     for attempt in range(1, MAX_ATTEMPTS + 1):
         try:
