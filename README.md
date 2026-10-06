@@ -1,87 +1,106 @@
-# PaperBrief
+# PaperBrief: LLM Research Summarizer
 
-A FastAPI + SQLite + LLM app that turns pasted research text into a validated, structured summary: title, summary, key findings, methods, limitations, and keywords.
+Paste an abstract or a section of a research paper and get a structured summary: key findings, methods, limitations and keywords. The LLM output is validated against a schema before it reaches the user.
+
+**Live demo:** https://paperbrief.onrender.com
+**API docs (Swagger):** https://paperbrief.onrender.com/docs
+
+> The demo runs on a free Render instance. The first request after idle can take 30-60 seconds while it wakes up. History is shared between visitors and resets on redeploys, so please don't paste sensitive text.
+
+<!-- Add a screenshot or GIF: save it as docs/screenshot.png and uncomment the next line -->
+<!-- ![PaperBrief screenshot](docs/screenshot.png) -->
 
 ## Features
-- **REST API:** `POST /api/summaries`, `GET /api/summaries`, `GET /api/summaries/{id}`, `DELETE /api/summaries/{id}`, and `GET /api/stats`. Interactive docs at `/docs`.
-- **Validated LLM output:** the model is prompted to return strict JSON, which is parsed and checked against a Pydantic schema (1-6 findings, 1-8 keywords, and so on).
-- **Failure handling:** up to 3 attempts per request, with a short backoff between them. Malformed or truncated JSON, timeouts, and temporary API errors (such as 503 "high demand") trigger a retry instead of an immediate failure.
-- **Run logging:** every run, successful or failed, is stored in SQLite with input size, attempt count, latency, and the error message if it failed.
-- **Observability:** `/api/stats` reports total runs, successes, failures, average latency, and how many runs succeeded only after a retry.
-- **Prompt-injection guard:** the system prompt tells the model to treat pasted text strictly as data.
-- **Optional webhook:** set `WEBHOOK_URL` (for example an n8n or Make webhook) and each new summary fires a `summary.created` event. Webhook failures never break the request.
-- **Frontend:** a single vanilla JS page with no build step.
-- **Demo mode:** with no API key set, the app returns placeholder output so the UI can be tested.
+
+- **Structured output:** every LLM response is validated against a Pydantic schema, so malformed output never reaches the user.
+- **Automatic retries:** failed calls (bad JSON, timeouts, API errors) are retried up to 3 times with exponential backoff.
+- **Model fallback:** if a Gemini model is retired, rate-limited or overloaded, the next model in the configured list is tried.
+- **Run logging and reliability stats:** every run is stored with status, attempts, latency and error. `GET /api/stats` reports success, failure and retry-recovery counts.
+- **Abuse protection:** per-IP rate limiting (5 summaries per minute) and a system-prompt guard against prompt injection.
+- **Optional webhook:** set `WEBHOOK_URL` to notify an external automation (n8n, Make, etc.) whenever a summary is created.
+- **Full CRUD REST API** backed by SQLite, with a vanilla JavaScript frontend served by FastAPI itself.
+
+## Tech stack
+
+Python, FastAPI, Pydantic, SQLite, httpx, slowapi, Gemini API, vanilla JavaScript (Fetch API), pytest. Deployed on Render.
+
+## API
+
+| Method | Endpoint | Description |
+| --- | --- | --- |
+| POST | `/api/summaries` | Create a summary (200-20,000 characters of text) |
+| GET | `/api/summaries` | List recent runs |
+| GET | `/api/summaries/{id}` | Get one summary |
+| DELETE | `/api/summaries/{id}` | Delete a summary |
+| GET | `/api/stats` | Success, failure and retry-recovery counts |
+
+Example:
+
+```bash
+curl -X POST http://localhost:8000/api/summaries \
+  -H "Content-Type: application/json" \
+  -d '{"text": "<at least 200 characters of paper text>"}'
+```
 
 ## Run locally
 
 ```bash
+git clone https://github.com/srashti-blocks/PaperBrief.git
+cd PaperBrief
 python -m venv venv
-source venv/bin/activate          # Windows: venv\Scripts\activate
+venv\Scripts\activate          # Windows (macOS/Linux: source venv/bin/activate)
 pip install -r requirements.txt
 ```
 
-Create a `.env` file (UTF-8, no quotes, no spaces around `=`):
+Create a `.env` file (never commit it):
 
 ```
-GEMINI_API_KEY=your_key_here
-GEMINI_MODEL=gemini-3.5-flash
+GEMINI_API_KEY=your-key-from-aistudio.google.com/apikey
 ```
 
-Get a free key at https://aistudio.google.com/apikey. Then start the server:
+Start the server:
 
 ```bash
 uvicorn main:app --reload
 ```
 
-Open http://127.0.0.1:8000 (API docs at http://127.0.0.1:8000/docs).
-
-Or set the variables in your shell instead of using `.env`:
-
-```powershell
-$env:GEMINI_API_KEY="your_key_here"    # PowerShell
-$env:GEMINI_MODEL="gemini-3.5-flash"
-```
+Open http://localhost:8000. Without a `GEMINI_API_KEY` the app runs in demo mode and returns placeholder output.
 
 ## Configuration
 
-| Variable | Purpose | Default |
-|---|---|---|
-| `GEMINI_API_KEY` | Enables real summaries (without it, demo mode runs) | none |
-| `GEMINI_MODEL` | Gemini model name | `gemini-3.5-flash` |
-| `DB_PATH` | SQLite file location | `paperbrief.db` |
-| `WEBHOOK_URL` | Optional webhook called on each new summary | none |
+| Variable | Required | Description |
+| --- | --- | --- |
+| `GEMINI_API_KEY` | Yes (for real summaries) | Free key from Google AI Studio |
+| `GEMINI_MODELS` | No | Comma-separated models, tried in order. Default: `gemini-3.5-flash,gemini-3.5-flash-lite,gemini-3.1-flash-lite` |
+| `DB_PATH` | No | SQLite file path. Default: `paperbrief.db` |
+| `WEBHOOK_URL` | No | URL notified after each successful summary |
 
-Gemini model names are retired regularly. If you get a 404, list the models your key can use and update `GEMINI_MODEL`:
+## Tests
 
-```bash
-curl "https://generativelanguage.googleapis.com/v1beta/models?key=$GEMINI_API_KEY"
-```
-
-Lite models (for example `gemini-3.5-flash-lite`) respond faster and are enough for summarization. The alias `gemini-flash-latest` avoids breakage when a specific model is retired.
-
-## Example
+The Gemini call is mocked, so tests run without an API key and use a temporary database.
 
 ```bash
-curl -X POST http://127.0.0.1:8000/api/summaries \
-  -H "Content-Type: application/json" \
-  -d '{"text": "<200 to 20,000 characters of paper text>"}'
+pip install -r requirements-dev.txt
+pytest -v
 ```
 
-The response includes the structured summary plus `id`, `attempts`, and `latency_ms`.
+Covered: input validation, successful summary, retry recovery after bad JSON, failure after max attempts, fenced-JSON handling, get/delete and stats.
 
-## Known limitations
-- Input must be 200-20,000 characters.
-- The API has no authentication, so don't expose it publicly with a paid key.
-- Summary quality depends on the chosen model, and LLM latency varies from a few seconds to over 30 seconds.
+## Design notes
 
-## Deploy (Render)
-1. New Web Service, then connect your GitHub repo.
-2. Build command: `pip install -r requirements.txt`
-3. Start command: `uvicorn main:app --host 0.0.0.0 --port $PORT`
-4. Add `GEMINI_API_KEY` and `GEMINI_MODEL` as environment variables.
+- **Why validate and retry?** LLMs sometimes return invalid JSON or miss required fields. Validation plus retries turns an unreliable model call into a dependable API endpoint.
+- **Why log every run?** Latency, attempts and errors make reliability measurable instead of guessed.
+- **Known limitations:** SQLite on a free host is not persistent, and history is not per-user. A planned next step is Postgres with user accounts.
 
-Free-tier disks are ephemeral, so run history resets on every redeploy.
+## Project structure
 
-## Security
-Never commit `.env` or API keys. This repo's `.gitignore` excludes `.env`, `venv/`, `paperbrief.db`, and `__pycache__/`.
+```
+PaperBrief/
+├── main.py                 # FastAPI app, routes, LLM and DB logic
+├── static/index.html       # Frontend (HTML, CSS, JavaScript)
+├── test_main.py            # pytest suite
+├── conftest.py             # temp DB and rate-limit setup for tests
+├── requirements.txt
+├── requirements-dev.txt
+└── pytest.ini
+```
